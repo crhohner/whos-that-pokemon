@@ -221,7 +221,6 @@ impl App {
             match self.input_mode {
                 InputMode::Navigate => match key.code {
                     KeyCode::Up => self.focus_guess(),
-                    KeyCode::Esc => self.exit = true,
                     KeyCode::Right => {
                         self.button_focus = (self.button_focus + 1) % 3;
                     }
@@ -284,10 +283,10 @@ impl App {
         let [canvas_area, hints_area, input_area, buttons_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints(vec![
-                Constraint::Percentage(70),
-                Constraint::Percentage(10),
-                Constraint::Percentage(10),
-                Constraint::Percentage(10),
+                Constraint::Min(0),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
             ])
             .areas(game_area.inner(ratatui::layout::Margin {
                 horizontal: (2),
@@ -349,7 +348,7 @@ impl Widget for &App {
 
         //render buttons
 
-        let [_, b1, b2, b3, _] = Layout::default()
+        let [left, b1, b2, b3, right] = Layout::default() //scuffed
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(0),
@@ -367,7 +366,7 @@ impl Widget for &App {
         for i in 0..3 {
             let mut button_style = Style::default();
             if self.input_mode == InputMode::Navigate && self.button_focus == i {
-                button_style = button_style.add_modifier(Modifier::REVERSED);
+                button_style = button_style.light_cyan();
             }
             Paragraph::new(button_text[i])
                 .style(button_style)
@@ -375,6 +374,18 @@ impl Widget for &App {
                 .alignment(Alignment::Center)
                 .render(button_areas[i], buf);
         }
+
+        Paragraph::new(". ݁₊ ⊹ . ݁ ⟡ ݁ . ⊹ ₊ ݁.⋆˙⟡ ⋆.˚ ⊹₊⟡ ⋆")
+            .block(Block::bordered())
+            .alignment(Alignment::Center)
+            .render(left, buf);
+
+        Paragraph::new(". ݁₊ ⊹ . ݁ ⟡ ݁ . ⊹ ₊ ݁.⋆˙⟡ ⋆.˚ ⊹₊⟡ ⋆")
+            .block(Block::bordered())
+            .alignment(Alignment::Center)
+            .render(right, buf);
+
+        //
     }
 }
 
