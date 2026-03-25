@@ -3017,7 +3017,6 @@ dependencies = [
 name = "whos-that"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "color-eyre",
  "crossterm",
  "image",

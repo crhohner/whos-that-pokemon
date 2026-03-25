@@ -1,7 +1,8 @@
+use std::fmt::Debug;
+
 use color_eyre::{
     Result,
     eyre::{bail, eyre},
-    owo_colors::colors::Magenta,
 };
 use crossterm::event::{self, Event, KeyCode};
 use log::debug;
@@ -70,7 +71,7 @@ struct Pokedex {
 #[derive(Deserialize, Debug, Default)]
 struct PokemonSpecies {
     varieties: Vec<PokemonVariety>,
-    // generation: PokemonGeneration,
+    generation: PokemonGeneration,
     shape: PokemonShape,
 }
 
@@ -93,25 +94,50 @@ struct PokemonVariety {
 #[derive(Deserialize, Debug, Default)]
 struct Pokemon {
     name: String,
-    //todo - grab the default information instead
     weight: i32,
     types: Vec<PokeTypeSlot>,
     sprites: PokeSpriteURL,
-    // generation: String,
-    // shape: String,
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Serialize, Debug, Default)]
+struct PokeData {
+    name: String,
+    //todo - grab the default information instead
+    weight: i32,
+    types: Vec<String>,
+    sprite: String,
+    generation: String,
+    shape: String,
+}
+
+impl PokeData {
+    fn new(pokemon: Pokemon, species: PokemonSpecies) -> Self {
+        Self {
+            name: pokemon.name.replace("-", " "),
+            weight: pokemon.weight,
+            types: pokemon
+                .types
+                .iter()
+                .map(|typ| typ.r#type.name.clone())
+                .collect::<Vec<_>>(),
+            sprite: pokemon.sprites.front_default,
+            generation: species.generation.name.replace("-", " "),
+            shape: species.shape.name,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Default)]
 struct PokeSpriteURL {
     front_default: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct PokeTypeSlot {
     r#type: PokeType,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct PokeType {
     name: String,
 }
@@ -130,14 +156,14 @@ impl Pokedex {
         Ok(())
     }
 
-    pub fn get_info(&mut self, poke_index: usize) -> Result<Pokemon> {
+    pub fn get_info(&mut self, poke_index: usize) -> Result<PokeData> {
         let pokemon_url = &self.results[poke_index].url;
 
-        let species_json = reqwest::blocking::get(pokemon_url)?
+        let species = reqwest::blocking::get(pokemon_url)?
             .error_for_status()?
             .json::<PokemonSpecies>()?;
 
-        let species = species_json
+        let default = species
             .varieties
             .iter()
             .find(|var| var.is_default)
@@ -148,12 +174,12 @@ impl Pokedex {
                 )
             })?;
 
-        let pokemon = reqwest::blocking::get(&species.pokemon.url)?
+        let pokemon = reqwest::blocking::get(&default.pokemon.url)?
             .error_for_status()?
             .json::<Pokemon>()?;
-        // pokemon.generation = species_json.generation.name;
-        // pokemon.shape = species_json.shape.name;
-        Ok(pokemon)
+
+        let pokedata = PokeData::new(pokemon, species);
+        Ok(pokedata)
     }
 }
 
@@ -169,10 +195,11 @@ pub struct App {
     pokedex: Pokedex,
     exit: bool,
     rng: ThreadRng,
-    pokemon: Pokemon,
+    pokemon: PokeData,
     input_mode: InputMode,
     input: Input,
     button_focus: usize,
+    hints_used: usize,
 }
 
 /*
@@ -232,7 +259,12 @@ impl App {
                             // quit
                             0 => self.exit = true,
                             // hint
-                            1 => {} //pass for now
+                            1 => {
+                                self.hints_used += 1;
+                                if self.hints_used > 4 {
+                                    self.next_pokemon()?
+                                }
+                            } //pass for now
                             // skip
                             2 => self.next_pokemon()?,
                             _ => bail!("invalid button press!!"),
@@ -241,7 +273,7 @@ impl App {
                     _ => {}
                 },
                 InputMode::Guess => match key.code {
-                    KeyCode::Enter => self.check_guess(),
+                    KeyCode::Enter => self.check_guess()?,
                     KeyCode::Down => self.focus_nav(),
                     _ => {
                         self.input.handle_event(&event);
@@ -262,13 +294,22 @@ impl App {
         self.button_focus = 0;
     }
 
-    fn check_guess(&mut self) {
-        debug!("{}", self.input.value_and_reset());
+    fn check_guess(&mut self) -> Result<()> {
+        let guess = self.input.value_and_reset();
+        if guess.to_lowercase() == self.pokemon.name {
+            self.next_pokemon()?
+        }
+        Ok(())
     }
 
     fn next_pokemon(&mut self) -> color_eyre::Result<()> {
         let n = self.rng.random_range(0..self.pokedex.count as usize);
         self.pokemon = self.pokedex.get_info(n)?;
+        debug!(
+            "{:#?}",
+            serde_json::to_string_pretty(&self.pokemon).unwrap()
+        );
+        self.hints_used = 0;
         Ok(())
     }
 
@@ -385,7 +426,24 @@ impl Widget for &App {
             .alignment(Alignment::Center)
             .render(right, buf);
 
-        //
+        let mut hints = vec![
+            self.pokemon.generation.clone(),
+            self.pokemon.shape.clone(),
+            self.pokemon.weight.to_string(),
+            format!("{:?}", self.pokemon.types),
+        ];
+
+        for i in self.hints_used..4 {
+            hints[i] = "*****".to_string();
+        }
+
+        //render hints
+        Paragraph::new(format!(
+            "{} | {} | {} | types: {}",
+            hints[0], hints[1], hints[2], hints[3],
+        ))
+        .alignment(Alignment::Center)
+        .render(hints_area, buf);
     }
 }
 
@@ -401,10 +459,11 @@ fn main() -> color_eyre::Result<()> {
 //TODO
 /*
 - fix input extra keystroke bug (table this i guess? esp if its a logging issue..)
-- make all ui arrow keys + enter + escape (buttons)
-- five guess worldle-like "game" + hints
-- win/lose results page (just the prev round for now)
+
+- fix gen/shape issue
+- hints (as speech bubbles?)
+- win ack and/or history
 - ascii converter / crush at diff resolutions
-- hints / increase resolution at each guess
+- display image(s)
 - cleanup
 */
