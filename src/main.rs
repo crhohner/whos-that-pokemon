@@ -1,10 +1,12 @@
 use std::fmt::Debug;
+mod ascii;
 
 use color_eyre::{
     Result,
     eyre::{bail, eyre},
 };
 use crossterm::event::{self, Event, KeyCode};
+use image::GrayAlphaImage;
 use log::debug;
 use rand::{RngExt, rngs::ThreadRng};
 use ratatui::{
@@ -14,7 +16,7 @@ use ratatui::{
     style::Modifier,
     symbols::border,
     text::Line,
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Block, Clear, Paragraph, Widget},
 };
 use ratatui::{
     layout::Alignment,
@@ -28,6 +30,8 @@ use serde::{Deserialize, Serialize};
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 use tui_logger::*;
+
+use crate::ascii::image_to_ascii;
 
 const API: &str = "https://pokeapi.co/api/v2/";
 
@@ -99,30 +103,34 @@ struct Pokemon {
     sprites: PokeSpriteURL,
 }
 
-#[derive(Deserialize, Serialize, Debug, Default)]
+#[derive(Debug, Default)]
 struct PokeData {
     name: String,
-    //todo - grab the default information instead
     weight: i32,
     types: Vec<String>,
-    sprite: String,
     generation: String,
     shape: String,
+    ascii_sprite: String,
 }
 
 impl PokeData {
-    fn new(pokemon: Pokemon, species: PokemonSpecies) -> Self {
+    fn new(
+        pokemon: Pokemon,
+        species: PokemonSpecies,
+        grayscale_sprite: GrayAlphaImage,
+        ascii_chars: &Vec<char>,
+    ) -> Self {
         Self {
             name: pokemon.name.replace("-", " "),
-            weight: pokemon.weight,
+            weight: pokemon.weight / 10,
             types: pokemon
                 .types
                 .iter()
                 .map(|typ| typ.r#type.name.clone())
                 .collect::<Vec<_>>(),
-            sprite: pokemon.sprites.front_default,
             generation: species.generation.name.replace("-", " "),
             shape: species.shape.name,
+            ascii_sprite: image_to_ascii(&grayscale_sprite, (40, 40), ascii_chars),
         }
     }
 }
@@ -156,7 +164,7 @@ impl Pokedex {
         Ok(())
     }
 
-    pub fn get_info(&mut self, poke_index: usize) -> Result<PokeData> {
+    pub fn get_info(&mut self, poke_index: usize, ascii_chars: &Vec<char>) -> Result<PokeData> {
         let pokemon_url = &self.results[poke_index].url;
 
         let species = reqwest::blocking::get(pokemon_url)?
@@ -178,7 +186,13 @@ impl Pokedex {
             .error_for_status()?
             .json::<Pokemon>()?;
 
-        let pokedata = PokeData::new(pokemon, species);
+        let sprite_bytes = reqwest::blocking::get(&pokemon.sprites.front_default)?
+            .error_for_status()?
+            .bytes()?;
+        let sprite = image::load_from_memory(&sprite_bytes)?;
+        let grayscale_sprite: GrayAlphaImage = sprite.to_luma_alpha8();
+
+        let pokedata = PokeData::new(pokemon, species, grayscale_sprite, ascii_chars);
         Ok(pokedata)
     }
 }
@@ -200,6 +214,9 @@ pub struct App {
     input: Input,
     button_focus: usize,
     hints_used: usize,
+    ascii_chars: Vec<char>,
+    popup: bool,
+    popup_text: String,
 }
 
 /*
@@ -213,10 +230,16 @@ pub struct App {
 
 impl App {
     pub fn init(&mut self) -> color_eyre::Result<()> {
+        self.ascii_chars = vec![' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
         self.pokedex.init()?;
         self.rng = rand::rng();
         self.next_pokemon()?;
         self.input_mode = InputMode::Navigate;
+        self.popup_text = "WELCOME to WHO'S THAT POKEMON!! 
+            thanks for checking out the project. 
+            arrow keys to navigate."
+            .to_string();
+        self.popup = true;
         Ok(())
     }
 
@@ -233,7 +256,7 @@ impl App {
     fn draw(&self, frame: &mut Frame) {
         frame.render_widget(self, frame.area());
         if self.input_mode == InputMode::Guess {
-            let (_, _, _, _, input_area, _) = &self.layout(frame.area());
+            let (_, _, _, input_area, _) = &self.layout(frame.area());
             frame.set_cursor_position(Position::new(
                 self.input.visual_cursor() as u16 + input_area.x + 1,
                 input_area.y + 1,
@@ -245,6 +268,19 @@ impl App {
         let event = event::read()?;
 
         if let Event::Key(key) = event {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.exit = true;
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    if self.popup {
+                        self.popup = false;
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
             match self.input_mode {
                 InputMode::Navigate => match key.code {
                     KeyCode::Up => self.focus_guess(),
@@ -262,11 +298,18 @@ impl App {
                             1 => {
                                 self.hints_used += 1;
                                 if self.hints_used > 4 {
+                                    self.popup_text =
+                                        format!("skipped! it's {}", self.pokemon.name);
+                                    self.popup = true;
                                     self.next_pokemon()?
                                 }
                             } //pass for now
                             // skip
-                            2 => self.next_pokemon()?,
+                            2 => {
+                                self.popup_text = format!("skipped! it's {}", self.pokemon.name);
+                                self.popup = true;
+                                self.next_pokemon()?;
+                            }
                             _ => bail!("invalid button press!!"),
                         }
                     }
@@ -297,6 +340,8 @@ impl App {
     fn check_guess(&mut self) -> Result<()> {
         let guess = self.input.value_and_reset();
         if guess.to_lowercase() == self.pokemon.name {
+            self.popup_text = format!("correct! it's {}", self.pokemon.name);
+            self.popup = true;
             self.next_pokemon()?
         }
         Ok(())
@@ -304,23 +349,12 @@ impl App {
 
     fn next_pokemon(&mut self) -> color_eyre::Result<()> {
         let n = self.rng.random_range(0..self.pokedex.count as usize);
-        self.pokemon = self.pokedex.get_info(n)?;
-        debug!(
-            "{:#?}",
-            serde_json::to_string_pretty(&self.pokemon).unwrap()
-        );
+        self.pokemon = self.pokedex.get_info(n, &self.ascii_chars)?;
         self.hints_used = 0;
         Ok(())
     }
 
-    fn layout(&self, area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect) {
-        let main_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Percentage(30), Constraint::Percentage(70)])
-            .split(area);
-        let logs_area = main_layout[0];
-        let game_area = main_layout[1];
-
+    fn layout(&self, area: Rect) -> (Rect, Rect, Rect, Rect, Rect) {
         let [canvas_area, hints_area, input_area, buttons_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints(vec![
@@ -329,15 +363,17 @@ impl App {
                 Constraint::Length(3),
                 Constraint::Length(3),
             ])
-            .areas(game_area.inner(ratatui::layout::Margin {
+            .areas(area.inner(ratatui::layout::Margin {
                 horizontal: (2),
                 vertical: (1),
             }));
 
         return (
-            logs_area,
-            game_area,
-            canvas_area,
+            area,
+            canvas_area.inner(ratatui::layout::Margin {
+                horizontal: (2),
+                vertical: (2),
+            }),
             hints_area,
             input_area,
             buttons_area,
@@ -347,16 +383,15 @@ impl App {
 
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let (logs_area, game_area, canvas_area, hints_area, input_area, buttons_area) =
-            self.layout(area);
+        let (game_area, canvas_area, hints_area, input_area, buttons_area) = self.layout(area);
 
-        //render logs
-        TuiLoggerWidget::default()
-            .block(Block::bordered().title("logs"))
-            .output_separator('|')
-            .output_level(Some(TuiLoggerLevelOutput::Long))
-            .style(Style::default().fg(Color::White))
-            .render(logs_area, buf);
+        // //render logs
+        // TuiLoggerWidget::default()
+        //     .block(Block::bordered().title("logs"))
+        //     .output_separator('|')
+        //     .output_level(Some(TuiLoggerLevelOutput::Long))
+        //     .style(Style::default().fg(Color::White))
+        //     .render(logs_area, buf);
 
         //render border
 
@@ -371,7 +406,7 @@ impl Widget for &App {
 
         //render ditto
 
-        Paragraph::new(ASCII_TEST)
+        Paragraph::new(self.pokemon.ascii_sprite.to_owned())
             .centered()
             .render(canvas_area, buf);
 
@@ -429,8 +464,8 @@ impl Widget for &App {
         let mut hints = vec![
             self.pokemon.generation.clone(),
             self.pokemon.shape.clone(),
-            self.pokemon.weight.to_string(),
-            format!("{:?}", self.pokemon.types),
+            self.pokemon.weight.to_string() + "kg",
+            format!("{}", self.pokemon.types.join(", ")),
         ];
 
         for i in self.hints_used..4 {
@@ -439,11 +474,20 @@ impl Widget for &App {
 
         //render hints
         Paragraph::new(format!(
-            "{} | {} | {} | types: {}",
+            "{} | {} | {} | type(s): {}",
             hints[0], hints[1], hints[2], hints[3],
         ))
         .alignment(Alignment::Center)
         .render(hints_area, buf);
+
+        if self.popup {
+            let popup_block = Block::bordered().title("enter to close");
+            let centered_area =
+                canvas_area.centered(Constraint::Percentage(60), Constraint::Percentage(20));
+            Clear.render(centered_area, buf);
+            let paragraph = Paragraph::new(self.popup_text.clone()).block(popup_block);
+            paragraph.render(centered_area, buf);
+        }
     }
 }
 
@@ -460,10 +504,7 @@ fn main() -> color_eyre::Result<()> {
 /*
 - fix input extra keystroke bug (table this i guess? esp if its a logging issue..)
 
-- fix gen/shape issue
-- hints (as speech bubbles?)
-- win ack and/or history
-- ascii converter / crush at diff resolutions
-- display image(s)
+- menus? or popup reuse
+- history
 - cleanup
 */
