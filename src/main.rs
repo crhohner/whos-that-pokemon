@@ -269,7 +269,7 @@ impl App {
 
         if let Event::Key(key) = event {
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Esc => {
                     self.exit = true;
                     return Ok(());
                 }
